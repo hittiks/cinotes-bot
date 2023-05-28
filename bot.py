@@ -191,7 +191,7 @@ async def language_call(callback: types.CallbackQuery):
         cur_executor("UPDATE users SET language=%s WHERE user_id=%s;", lang, uid)
     else:
         cur_executor("INSERT INTO users(user_id, language) VALUES (%s, %s);", uid, lang)
-        log(f"New user in database: {uid}", LogMode.INFO)
+        log(f"New user in database: {uid}", LogMode.OK)
         tu = cur_executor("SELECT * FROM users;")
         await bot.send_message(BOT_OWNER_ID, f"Новый пользователь в базе: {uid}\nСтало пользователей: {len(tu)}")
     

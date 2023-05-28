@@ -1,14 +1,17 @@
 import os
 import json
 import base64
+import asyncio
 import requests
 import psycopg2
 
-from datetime import datetime
 from logger import log, LogMode
+from datetime import datetime
+from languages import TEXTS
 
 from aiogram import Bot as AiogramBot, Dispatcher, executor, types
 from aiogram.types.message import ContentTypes
+from aiogram.types.input_file import InputFile
 from aiogram.types.web_app_info import WebAppInfo
 from aiogram.dispatcher.filters import BoundFilter, Text
 from aiogram.types.reply_keyboard import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
@@ -18,6 +21,7 @@ from aiogram.types.inline_keyboard import InlineKeyboardMarkup, InlineKeyboardBu
 bot = AiogramBot(os.environ["cinotes_bot_token"])
 dp = Dispatcher(bot)
 BOT_OWNER_ID = int(os.environ["cinotes_bot_owner_id"])
+USERS_LANGS = dict()
 
 
 class BotOwnerFilter(BoundFilter):
@@ -49,6 +53,20 @@ class BotAdminFilter(BoundFilter):
 
 
 dp.filters_factory.bind(BotAdminFilter)
+
+
+async def get_lang(user_id: int):
+    global USERS_LANGS
+    if USERS_LANGS.get(user_id):
+        return USERS_LANGS.get(user_id)
+    
+    res = cur_executor("SELECT language FROM users WHERE user_id=%s;", user_id)
+    if isinstance(res[0], str):
+        await bot.send_message(BOT_OWNER_ID, f"Не удалось получить язык юзера из-за sql-ошибки: type: '{res[0]}', text: '{res[1]}'")
+        return "en"
+    
+    USERS_LANGS[user_id] = res[0][0]
+    return res[0][0]
 
 
 def cur_executor(command: str, *args):
@@ -109,7 +127,7 @@ async def start_db():
 
     cur = base.cursor()
     cur.execute("CREATE TABLE IF NOT EXISTS users(user_id BIGINT PRIMARY KEY NOT NULL, language TEXT NOT NULL);")
-    cur.execute("CREATE TABLE IF NOT EXISTS accounts(user_id BIGINT PRIMARY KEY NOT NULL, user_type TEXT NOT NULL, jwt TEXT NOT NULL);")
+    cur.execute("CREATE TABLE IF NOT EXISTS accounts(user_id BIGINT PRIMARY KEY NOT NULL, user_type TEXT NOT NULL, jwt TEXT NOT NULL, expire_on BIGINT NOT NULL);")
     cur.execute("CREATE TABLE IF NOT EXISTS weights(user_id BIGINT PRIMARY KEY NOT NULL, weights TEXT NOT NULL);")
 
 
@@ -147,7 +165,8 @@ async def start_func(message: types.Message):
 
     res = cur_executor("SELECT * FROM users WHERE user_id=%s;", message.chat.id)
     if res and isinstance(res[0], tuple):
-        await message.answer("Привіт, я бот персональних рекомендацій для проекту Cinotes. Тисни /help для отримання інструкцій")
+        lang = await get_lang(message.chat.id)
+        await message.answer(TEXTS[lang]["start_message"])
     else:
         await bot.send_message(message.chat.id, "Обери мову бота / Choose bot language", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [
@@ -164,19 +183,27 @@ async def language_call(callback: types.CallbackQuery):
     lang = callback.data.split("_")[1]
     uid = callback.message.chat.id
 
+    global USERS_LANGS
+    USERS_LANGS[uid] = lang
+
     res = cur_executor("SELECT * FROM users WHERE user_id=%s;", uid)
     if res and isinstance(res[0], tuple):
         cur_executor("UPDATE users SET language=%s WHERE user_id=%s;", lang, uid)
     else:
         cur_executor("INSERT INTO users(user_id, language) VALUES (%s, %s);", uid, lang)
+        log(f"New user in database: {uid}", LogMode.INFO)
+        tu = cur_executor("SELECT * FROM users;")
+        await bot.send_message(BOT_OWNER_ID, f"Новый пользователь в базе: {uid}\nСтало пользователей: {len(tu)}")
     
-    await callback.message.edit_text("Привіт, я бот персональних рекомендацій для проекту Cinotes. Тисни /help для отримання інструкцій")
+    lang = await get_lang(uid)
+    await callback.message.edit_text(TEXTS[lang]["start_message"])
 
 
 async def check_user_in_db(uid: int) -> bool:
     res = bool(cur_executor("SELECT user_id FROM users WHERE user_id=%s;", uid))
     if not res:
-        await bot.send_message(uid, "Виникла помилка всередині бота, відправ /start")
+        lang = await get_lang(uid)
+        await bot.send_message(uid, TEXTS[lang]["user_not_in_db_error"])
     return res
 
 
@@ -187,8 +214,8 @@ async def help_func(message: types.Message):
     if not await check_user_in_db(message.chat.id):
         return
 
-    await message.answer("<b>Пізніше</b> <i>тут</i> <code>щось</code> буде...", parse_mode="HTML")
-
+    lang = await get_lang(message.chat.id)
+    await message.answer(TEXTS[lang]["help_message"], parse_mode="HTML")
 
 
 @dp.message_handler(commands=["language"])
@@ -213,16 +240,17 @@ async def login_func(message: types.Message):
     if not await check_user_in_db(message.chat.id):
         return
 
-    await bot.send_message(message.chat.id, "Просто натисни на кнопку внизу", reply_markup=ReplyKeyboardMarkup(
+    lang = await get_lang(message.chat.id)
+    await bot.send_message(message.chat.id, TEXTS[lang]["press_button_to_login"], reply_markup=ReplyKeyboardMarkup(
         [
             [
-                KeyboardButton("Авторизуватися", web_app=WebAppInfo(url="https://hittiks.github.io/"))
+                KeyboardButton(TEXTS[lang]["login_button_text"], web_app=WebAppInfo(url="https://hittiks.github.io/"))
             ]
         ], True
     ))
 
 
-async def add_account_to_db(user_id: int, user_type: str, jwt: str):
+async def add_account_to_db(user_id: int, user_type: str, jwt: str, expire_on: int):
     log(f"Trying add to db account of user {user_id} with type '{user_type}' and jwt '{jwt}'", LogMode.INFO)
 
     res = cur_executor("SELECT user_id FROM accounts WHERE user_id=%s;", user_id)
@@ -231,10 +259,10 @@ async def add_account_to_db(user_id: int, user_type: str, jwt: str):
         return False
     
     if res and isinstance(res[0], tuple):
-        cur_executor("UPDATE accounts SET user_type=%s, jwt=%s WHERE user_id=%s;", user_type, jwt, user_id)
+        cur_executor("UPDATE accounts SET user_type=%s, jwt=%s, expire_on=%s WHERE user_id=%s;", user_type, jwt, expire_on, user_id)
         return True
     else:
-        cur_executor("INSERT INTO accounts(user_id, user_type, jwt) VALUES (%s, %s, %s);", user_id, user_type, jwt)
+        cur_executor("INSERT INTO accounts(user_id, user_type, jwt, expire_on) VALUES (%s, %s, %s, %s);", user_id, user_type, jwt, expire_on)
         return True
 
 
@@ -245,7 +273,8 @@ async def handle_web_app_data_func(message :types.Message):
     if not await check_user_in_db(message.chat.id):
         return
 
-    temp = await message.answer("Намагаюсь авторизуватися...")
+    lang = await get_lang(message.chat.id)
+    temp = await message.answer(TEXTS[lang]["trying_login"])
 
     login, password = message.web_app_data["data"].split("\n")
     log(f"Username: '{login}', password: '{password}'", LogMode.INFO)
@@ -260,46 +289,46 @@ async def handle_web_app_data_func(message :types.Message):
     if response.status_code != 200:
         if response.status_code == 404 and "no user with such email" in response.text:
             log("Wrong email", LogMode.WARNING)
-            await temp.edit_text("Виникла помилка: вказано неправильну пошту")
+            await temp.edit_text(TEXTS[lang]["wrong_email"])
             return
         elif response.status_code == 403 and "wrong password" in response.text:
             log("Wrong password", LogMode.WARNING)
-            await temp.edit_text("Виникла помилка: вказано неправильний пароль")
+            await temp.edit_text(TEXTS[lang]["wrong_password"])
             return
         else:
-            await temp.edit_text("Виникла невідома помилка")
+            await temp.edit_text(TEXTS[lang]["unknown_server_error"])
             log(f"Get unknown error: status code: {response.status_code}, response text: '{response.text.strip()}'", LogMode.ERROR)
             return
 
     try:
         jwt: str = response.json()["jwt"]
         log(f"JWT: '{jwt}'", LogMode.OK)
-        await temp.edit_text("Успішно авторизований!")
+        await temp.edit_text(TEXTS[lang]["success_login"])
         parts = jwt.split(".")
 
         data_str = base64.b64decode(parts[1] + "=" * (4-(len(parts[1]) % 4))).decode("utf-8")
         data = json.loads(data_str)
         dt = datetime.fromtimestamp(data["exp"])
 
-        await message.answer(f"Токен авторизації дійсний до: {dt}", reply_markup=ReplyKeyboardRemove())
+        await message.answer(TEXTS[lang]["jwt_expire_on"].format(dt=dt), reply_markup=ReplyKeyboardRemove())
 
         user_type = data["userType"]
 
         if user_type == "basic":
             log(f"Account of user {message.chat.id} is basic so he don't accessed to recomendations", LogMode.INFO)
-            await message.answer("Тобі недоступна система рекомендацій. Щоб отримати доступ, придбай віп-підписку на сайті або у додатку")
+            await message.answer(TEXTS[lang]["user_is_basic"])
 
         if user_type == "admin":
-            await add_account_to_db(message.chat.id, user_type, jwt)
-            await message.answer("Твій акаунт розпізнано як адміністративний. Тобі будуть доступні деякі додаткові функції, детальніше: /admin")
+            await add_account_to_db(message.chat.id, user_type, jwt, int(data["exp"]))
+            await message.answer(TEXTS[lang]["user_is_admin"])
 
         if user_type == "premium":
-            await add_account_to_db(message.chat.id, user_type, jwt)
-            await message.answer("Бота успішно підключено!")
+            await add_account_to_db(message.chat.id, user_type, jwt, int(data["exp"]))
+            await message.answer(TEXTS[lang]["user_is_premium"])
 
     except Exception as e:
         log(f"Get error when parse jwt: error type: '{type(e).__name__}', error args: '{e.args}'", LogMode.ERROR)
-        await temp.edit_text("Виникла невідома помилка")
+        await temp.edit_text(TEXTS[lang]["unknown_bot_error"])
 
 
 @dp.message_handler(is_bot_admin=True, commands=["admin"])
@@ -309,19 +338,53 @@ async def admin_func(message: types.Message):
     if not await check_user_in_db(message.chat.id):
         return
 
-    await message.answer("Тут буде інформація про додаткові можливості адміністраторів")
+    lang = await get_lang(message.chat.id)
+    await message.answer(TEXTS[lang]["admin_message"])
+
+
+@dp.message_handler(is_bot_owner=True, commands=["sqlexecute"])
+async def sqlexecute_func(message: types.Message):
+    log("Trying execute sql query", LogMode.INFO)
+
+    try:
+        query = message.text.split("/sqlexecute ", maxsplit=1)[1]
+    except (IndexError, ValueError):
+        await message.reply("Требуется параметр в виде строки")
+        return
+
+    result = cur_executor(query)
+    if result == ['ProgrammingError', 'no results to fetch'] or not result:
+        await message.reply("Запрос не вернул никаких данных")
+    elif result[0] and result[0] == "UniqueViolation":
+        await message.reply("Такие данные уже есть в бд")
+    elif result[0] and isinstance(result[0], str):
+        await message.reply(f"Произошла ошибка во время выполнения запроса:\nТип: '{result[0]}'\nТекст: '{result[1]}'")
+    else:
+        with open("tempfile.txt", "w") as f:
+            f.write(str(result))
+        
+        mess = await message.reply_document(InputFile("tempfile.txt"), caption="Результат выполнения запроса в файле")
+        while True:
+            if mess:
+                os.remove("tempfile.txt")
+                break
+            asyncio.sleep(1)
 
 
 @dp.message_handler(content_types=['text'])
 async def text_handler(message: types.Message):
     log(f"Get unknown text '{message.text}' from user {message.chat.id}", LogMode.INFO)
-    await message.answer("Я не розумію тебе. Відправ /start або /help")
+    
+    lang = await get_lang(message.chat.id)
+    await message.answer(TEXTS[lang]["get_unknown_text_message"])
 
 
 @dp.message_handler(content_types=ContentTypes.all())
 async def other_handler(message: types.Message):
     log(f"Get illegal type of message from user {message.chat.id}", LogMode.INFO)
-    await message.answer("Я приймаю лише текстові повідомлення. Для отримання інструкцій натисни /help")
+    
+    lang = await get_lang(message.chat.id)
+    await message.answer(TEXTS[lang]["get_unknown_type_of_message"])
 
 
 if __name__ == "__main__":

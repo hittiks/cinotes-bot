@@ -1,9 +1,11 @@
 import os
+import sys
 import json
 import base64
 import asyncio
 import requests
 import psycopg2
+import traceback
 
 from logger import log, LogMode
 from datetime import datetime
@@ -424,12 +426,12 @@ async def sqlexecute_func(message: types.Message):
         with open("tempfile.txt", "w") as f:
             f.write(str(result))
         
-        mess = await message.reply_document(InputFile("tempfile.txt"), caption="Результат выполнения запроса в файле")
-        while True:
-            if mess:
-                os.remove("tempfile.txt")
-                break
-            asyncio.sleep(1)
+        await message.reply_document(InputFile("tempfile.txt"), caption="Результат выполнения запроса в файле")
+        
+        try:
+            os.remove("tempfile.txt")
+        except:
+            pass
 
 
 @dp.message_handler(content_types=['text'])
@@ -446,6 +448,28 @@ async def other_handler(message: types.Message):
     
     lang = await get_lang(message.chat.id)
     await message.answer(TEXTS[lang]["get_unknown_type_of_message"])
+
+
+@dp.errors_handler()
+async def errors_handler(update: types.Update, e: Exception):
+    text = f"Catch error:\n\nUpdate: {update}\n\n{''.join(traceback.format_exception(*sys.exc_info())).strip()}"
+
+    log(text, LogMode.ERROR)
+
+    try:
+        await bot.send_message(BOT_OWNER_ID, text)
+    except tg_exceptions.MessageIsTooLong:
+        with open("tempfile.txt", "w") as f:
+            f.write(text)
+        
+        await bot.send_document(BOT_OWNER_ID, InputFile("tempfile.txt"), caption="Перехвачена ошибка")
+        
+        try:
+            os.remove("tempfile.txt")
+        except:
+            pass
+
+    return True
 
 
 if __name__ == "__main__":

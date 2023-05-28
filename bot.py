@@ -129,7 +129,7 @@ async def start_db():
     cur.execute("CREATE TABLE IF NOT EXISTS users(user_id BIGINT PRIMARY KEY NOT NULL, language TEXT NOT NULL);")
     cur.execute("CREATE TABLE IF NOT EXISTS accounts(user_id BIGINT PRIMARY KEY NOT NULL, user_type TEXT NOT NULL, jwt TEXT NOT NULL, expire_on BIGINT NOT NULL);")
     cur.execute("CREATE TABLE IF NOT EXISTS weights(user_id BIGINT PRIMARY KEY NOT NULL, weights TEXT NOT NULL);")
-
+    cur.execute("CREATE TABLE IF NOT EXISTS recommendation_system_usage(recommendation_id TEXT PRIMARY KEY NOT NULL, user_id BIGINT NOT NULL, on_date DATE NOT NULL, film_id BIGINT NOT NULL);")
 
     tu = cur_executor("SELECT * FROM users;")
     if len(tu) == 0 or isinstance(tu[0], tuple):
@@ -186,6 +186,9 @@ async def language_call(callback: types.CallbackQuery):
     global USERS_LANGS
     USERS_LANGS[uid] = lang
 
+    lang = await get_lang(uid)
+    await callback.message.edit_text(TEXTS[lang]["language_message"])
+
     res = cur_executor("SELECT * FROM users WHERE user_id=%s;", uid)
     if res and isinstance(res[0], tuple):
         cur_executor("UPDATE users SET language=%s WHERE user_id=%s;", lang, uid)
@@ -195,8 +198,7 @@ async def language_call(callback: types.CallbackQuery):
         tu = cur_executor("SELECT * FROM users;")
         await bot.send_message(BOT_OWNER_ID, f"Новый пользователь в базе: {uid}\nСтало пользователей: {len(tu)}")
     
-    lang = await get_lang(uid)
-    await callback.message.edit_text(TEXTS[lang]["start_message"])
+        await bot.send_message(uid, TEXTS[lang]["start_message"])
 
 
 async def check_user_in_db(uid: int) -> bool:
@@ -315,7 +317,7 @@ async def handle_web_app_data_func(message :types.Message):
         user_type = data["userType"]
 
         if user_type == "basic":
-            log(f"Account of user {message.chat.id} is basic so he don't accessed to recomendations", LogMode.INFO)
+            log(f"Account of user {message.chat.id} is basic so he don't accessed to recommendations", LogMode.INFO)
             await message.answer(TEXTS[lang]["user_is_basic"])
 
         if user_type == "admin":
@@ -340,6 +342,34 @@ async def admin_func(message: types.Message):
 
     lang = await get_lang(message.chat.id)
     await message.answer(TEXTS[lang]["admin_message"])
+
+
+@dp.message_handler(is_bot_admin=True, commands=["stat"])
+async def stat_func(message: types.Message):
+    log(f"Get stat by user {message.chat.id}", LogMode.INFO)
+
+    if not await check_user_in_db(message.chat.id):
+        return
+
+    lang = await get_lang(message.chat.id)
+
+    total_users = len(cur_executor("SELECT user_id FROM users;"))
+
+    total_accounts = len(cur_executor("SELECT user_id FROM accounts;"))
+    admin_accounts = len(cur_executor("SELECT user_id FROM accounts WHERE user_type='admin';"))
+    premium_accounts = len(cur_executor("SELECT user_id FROM accounts WHERE user_type='premium';"))
+
+    total_recommendations = len(cur_executor("SELECT recommendation_id FROM recommendation_system_usage;"))
+    recommendations_today = len(cur_executor("SELECT recommendation_id FROM recommendation_system_usage WHERE on_date=%s;", datetime.now().date()))
+
+    await message.answer(TEXTS[lang]["stat_message"].format(
+            total_users=total_users,
+            total_accounts=total_accounts,
+            admin_accounts=admin_accounts,
+            premium_accounts=premium_accounts,
+            total_recommendations=total_recommendations,
+            recommendations_today=recommendations_today
+        ))
 
 
 @dp.message_handler(is_bot_owner=True, commands=["stop"])

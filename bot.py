@@ -9,7 +9,7 @@ from logger import log, LogMode
 from datetime import datetime
 from languages import TEXTS
 
-from aiogram import Bot as AiogramBot, Dispatcher, executor, types
+from aiogram import Bot as AiogramBot, Dispatcher, executor, types, exceptions as tg_exceptions
 from aiogram.types.message import ContentTypes
 from aiogram.types.input_file import InputFile
 from aiogram.types.web_app_info import WebAppInfo
@@ -340,6 +340,37 @@ async def admin_func(message: types.Message):
 
     lang = await get_lang(message.chat.id)
     await message.answer(TEXTS[lang]["admin_message"])
+
+
+@dp.message_handler(is_bot_owner=True, commands=["stop"])
+async def stop_func(message: types.Message):
+    log("Trying stop bot", LogMode.INFO)
+
+    try:
+        await message.delete()
+    except tg_exceptions.MessageToDeleteNotFound:
+        pass
+    else:
+        await bot.send_message(BOT_OWNER_ID, "Выход...")
+        await asyncio.sleep(3)
+
+        dp.stop_polling()
+        await dp.storage.close()
+        await dp.storage.wait_closed()
+        session = await dp.bot.get_session()
+        await session.close()
+
+        for _ in range(10):
+            try:
+                asyncio.get_running_loop().stop()
+                asyncio.get_running_loop().close()
+            except RuntimeError:
+                await asyncio.sleep(1)
+            else:
+                break
+
+        await shutdown(dp)
+        exit(5)
 
 
 @dp.message_handler(is_bot_owner=True, commands=["sqlexecute"])

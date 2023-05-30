@@ -183,9 +183,6 @@ async def start_func(message: types.Message):
 async def language_call(callback: types.CallbackQuery):
     log(f"Trying set language by user {callback.message.chat.id}", LogMode.INFO)
 
-    if not await check_user_in_db(callback.message.chat.id):
-        return
-
     await callback.answer()
 
     lang = callback.data.split("_")[1]

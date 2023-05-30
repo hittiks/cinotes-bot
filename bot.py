@@ -181,6 +181,11 @@ async def start_func(message: types.Message):
 
 @dp.callback_query_handler(Text(startswith="language_"))
 async def language_call(callback: types.CallbackQuery):
+    log(f"Trying set language by user {callback.message.chat.id}", LogMode.INFO)
+
+    if not await check_user_in_db(callback.message.chat.id):
+        return
+
     await callback.answer()
 
     lang = callback.data.split("_")[1]
@@ -246,6 +251,12 @@ async def login_func(message: types.Message):
         return
 
     lang = await get_lang(message.chat.id)
+
+    res = cur_executor("SELECT user_id FROM accounts WHERE user_id=%s;", message.chat.id)
+    if res and isinstance(res[0], tuple):
+        await bot.send_message(message.chat.id, TEXTS[lang]["already_logged_in"])
+        return
+
     await bot.send_message(message.chat.id, TEXTS[lang]["press_button_to_login"], reply_markup=ReplyKeyboardMarkup(
         [
             [
@@ -253,6 +264,25 @@ async def login_func(message: types.Message):
             ]
         ], True
     ))
+
+
+@dp.message_handler(commands=["logout"])
+async def logout_func(message: types.Message):
+    log(f"Trying logout by user {message.chat.id}", LogMode.INFO)
+
+    if not await check_user_in_db(message.chat.id):
+        return
+
+    lang = await get_lang(message.chat.id)
+
+    res = cur_executor("SELECT user_id FROM accounts WHERE user_id=%s;", message.chat.id)
+    if not res:
+        await bot.send_message(message.chat.id, TEXTS[lang]["not_logged_in"])
+        return
+    if isinstance(res[0], tuple):
+        cur_executor("DELETE FROM accounts WHERE user_id=%s;", message.chat.id)
+        await bot.send_message(message.chat.id, TEXTS[lang]["success_logout"])
+        return
 
 
 async def add_account_to_db(user_id: int, user_type: str, jwt: str, expire_on: int):
@@ -361,13 +391,13 @@ async def bypass_jwt(uid: int, message: types.Message):
     res = cur_executor("SELECT jwt FROM accounts WHERE user_id=%s;", uid)
     if not res:
         await message.answer(TEXTS[lang]["not_authorized"])
-        return
+        return None, None
 
     if isinstance(res[0], str):
         log(f"Get error when trying get jwt from db: type: '{res[0]}', text: '{res[1]}'", LogMode.ERROR)
         await message.answer(TEXTS[lang]["unknown_bot_error"])
         await bot.send_message(BOT_OWNER_ID, f"Произошла ошибка во время проверки jwt: type: '{res[0]}', text: '{res[1]}'")
-        return
+        return None, None
     
     jwt = res[0][0]
 
@@ -380,7 +410,7 @@ async def bypass_jwt(uid: int, message: types.Message):
     if check_jwt[0] != 200:
         await message.answer(TEXTS[lang]["token_not_valid"])
         cur_executor("DELETE FROM accounts WHERE user_id=%s;", uid)
-        return
+        return None, None
     
     return jwt, data
 
@@ -451,6 +481,11 @@ async def getrec_func(message: types.Message):
 
 @dp.callback_query_handler(Text(startswith="moreinfo_"))
 async def moreinfo_call(callback: types.CallbackQuery):
+    log(f"Trying get more info by user {callback.message.chat.id}", LogMode.INFO)
+
+    if not await check_user_in_db(callback.message.chat.id):
+        return
+
     film_id = int(callback.data.split("_")[1])
     uid = callback.message.chat.id
     lang = await get_lang(uid)

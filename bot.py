@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import base64
+import random
 import asyncio
 import requests
 import psycopg2
@@ -16,6 +17,7 @@ from aiogram.types.message import ContentTypes
 from aiogram.types.input_file import InputFile
 from aiogram.types.web_app_info import WebAppInfo
 from aiogram.dispatcher.filters import BoundFilter, Text
+from aiogram.types.message_entity import MessageEntity, MessageEntityType
 from aiogram.types.reply_keyboard import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.types.inline_keyboard import InlineKeyboardMarkup, InlineKeyboardButton
 
@@ -130,7 +132,6 @@ async def start_db():
     cur = base.cursor()
     cur.execute("CREATE TABLE IF NOT EXISTS users(user_id BIGINT PRIMARY KEY NOT NULL, language TEXT NOT NULL);")
     cur.execute("CREATE TABLE IF NOT EXISTS accounts(user_id BIGINT PRIMARY KEY NOT NULL, user_type TEXT NOT NULL, jwt TEXT NOT NULL, expire_on BIGINT NOT NULL);")
-    cur.execute("CREATE TABLE IF NOT EXISTS weights(user_id BIGINT PRIMARY KEY NOT NULL, weights TEXT NOT NULL);")
     cur.execute("CREATE TABLE IF NOT EXISTS recommendation_system_usage(recommendation_id TEXT PRIMARY KEY NOT NULL, user_id BIGINT NOT NULL, on_date DATE NOT NULL, film_id BIGINT NOT NULL);")
 
     tu = cur_executor("SELECT * FROM users;")
@@ -333,6 +334,153 @@ async def handle_web_app_data_func(message :types.Message):
     except Exception as e:
         log(f"Get error when parse jwt: error type: '{type(e).__name__}', error args: '{e.args}'", LogMode.ERROR)
         await temp.edit_text(TEXTS[lang]["unknown_bot_error"])
+
+
+async def get_data(jwt: str, path: str, **kwargs):
+    url = "http://cinotes-alb-1929580936.eu-central-1.elb.amazonaws.com" + path
+
+    if kwargs:
+        url += "?"
+        for k, v in kwargs.items():
+            url += f"{k}={v}&"
+        
+        url = url[:-1]
+
+    headers = {
+        "Authorization": "Bearer " + jwt
+    }
+
+    response = requests.get(url, headers=headers)
+
+    return response.status_code, response
+
+
+async def bypass_jwt(uid: int, message: types.Message):
+    lang = await get_lang(uid)
+    
+    res = cur_executor("SELECT jwt FROM accounts WHERE user_id=%s;", uid)
+    if not res:
+        await message.answer(TEXTS[lang]["not_authorized"])
+        return
+
+    if isinstance(res[0], str):
+        log(f"Get error when trying get jwt from db: type: '{res[0]}', text: '{res[1]}'", LogMode.ERROR)
+        await message.answer(TEXTS[lang]["unknown_bot_error"])
+        await bot.send_message(BOT_OWNER_ID, f"Произошла ошибка во время проверки jwt: type: '{res[0]}', text: '{res[1]}'")
+        return
+    
+    jwt = res[0][0]
+
+    parts = jwt.split(".")
+    data_str = base64.b64decode(parts[1] + "=" * (4-(len(parts[1]) % 4))).decode("utf-8")
+    data = json.loads(data_str)
+
+    check_jwt = await get_data(jwt, "/user-data/get", user_id=data["id"])
+
+    if check_jwt[0] != 200:
+        await message.answer(TEXTS[lang]["token_not_valid"])
+        cur_executor("DELETE FROM accounts WHERE user_id=%s;", uid)
+        return
+    
+    return jwt, data
+
+
+def gen_rand_text():
+    alph = list("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+    random.shuffle(alph)
+    return "".join(alph[:10])
+
+
+@dp.message_handler(commands=["getrec"])
+async def getrec_func(message: types.Message):
+    log(f"Trying get recommendation by user {message.chat.id}", LogMode.INFO)
+
+    if not await check_user_in_db(message.chat.id):
+        return
+
+    uid = message.chat.id
+    lang = await get_lang(uid)
+    
+    jwt, jwt_data = await bypass_jwt(uid, message)
+    if not jwt:
+        return
+    
+    profile = (await get_data(jwt, "/user-data/get", user_id=jwt_data["id"]))[1].json()
+
+    fav_actor = await get_data(jwt, f"/actors/{profile['FavActor']}/")
+    fav_genre = await get_data(jwt, f"/films/genres/{profile['FavGenre']}/")
+    fav_film = await get_data(jwt, f"/films/{profile['FavFilm']}/")
+
+    try:
+        fav_actor = fav_actor[1].json()
+        fav_genre = fav_genre[1].json()
+        fav_film = fav_film[1].json()
+        if {'detail': 'Not found.'} in [fav_actor, fav_genre, fav_film]:
+            raise ValueError
+    except (requests.exceptions.JSONDecodeError, ValueError):
+        log(f"Get JSONDecodeError when feching favorites from users account: fav_actor_id: '{profile['FavActor']}', fav_genre_id: '{profile['FavGenre']}', fav_film_id: '{profile['FavFilm']}'", LogMode.ERROR)
+        await message.answer(TEXTS[lang]["unknown_bot_error"])
+        await bot.send_message(BOT_OWNER_ID, f"Произошла ошибка во время сбора данных с аккаунта юзера: fav_actor_id: '{profile['FavActor']}', fav_genre_id: '{profile['FavGenre']}', fav_film_id: '{profile['FavFilm']}'")
+        return
+
+    films = (await get_data(jwt, "/films/", genre=fav_genre["title"], page_size=200))[1].json()
+
+    # TODO: тут запрашиваем список тех фильмов, что уже посмотрел, ну и исключаем их из переменной films, а если посмотрел уже все, то игнорим это правило
+
+    random.shuffle(films["results"])
+
+    for short_film in films["results"][:1]:
+        await bot.send_photo(uid, short_film["poster_file"], caption=short_film["title"],
+            caption_entities=[
+                MessageEntity(MessageEntityType.TEXT_LINK, 0, len(short_film["title"]), short_film["url"])
+            ],
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(TEXTS[lang]["more_info_button_text"], callback_data=f"moreinfo_{short_film['url'].split('/films/')[-1].split('/')[0]}")
+                ]
+            ]))
+        # recommendation_system_usage (recommendation_id TEXT PRIMARY KEY NOT NULL, user_id BIGINT NOT NULL, on_date DATE NOT NULL, film_id BIGINT NOT NULL)
+
+        while True:
+            recommendation_id = gen_rand_text()
+            if not cur_executor("SELECT * FROM recommendation_system_usage WHERE recommendation_id=%s;", recommendation_id):
+                break
+
+        cur_executor("INSERT INTO recommendation_system_usage(recommendation_id, user_id, on_date, film_id) VALUES (%s, %s, %s, %s);", recommendation_id, uid, datetime.now().date(), short_film['url'].split('/films/')[-1].split('/')[0])
+
+
+@dp.callback_query_handler(Text(startswith="moreinfo_"))
+async def moreinfo_call(callback: types.CallbackQuery):
+    film_id = int(callback.data.split("_")[1])
+    uid = callback.message.chat.id
+    lang = await get_lang(uid)
+
+    jwt, jwt_data = await bypass_jwt(uid, callback.message)
+    if not jwt:
+        return
+
+    film = await get_data(jwt, f"/films/{film_id}/")
+
+    if film[0] != 200 or {'detail': 'Not found.'} in film:
+        await callback.answer(TEXTS[lang]["film_not_found"])
+        return
+
+    film_data = film[1].json()
+
+    text = TEXTS[lang]["full_info_text"].format(
+        name=callback.message.caption,
+        country=film_data["country"],
+        release_date=film_data["release_date"],
+        rating=film_data["rating"],
+        imdb_rating=film_data["imdb_rating"],
+        genres=", ".join(map(lambda x: x["title"], film_data["genres"])),
+        studio=film_data["studio"],
+        director=film_data["director"]
+    )
+
+    await callback.message.edit_caption(text, caption_entities=[
+                MessageEntity(MessageEntityType.TEXT_LINK, 0, len(callback.message.caption), callback.message.caption_entities[0].url)
+            ])
 
 
 @dp.message_handler(is_bot_admin=True, commands=["admin"])

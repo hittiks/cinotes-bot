@@ -457,9 +457,9 @@ async def getrec_func(message: types.Message):
     random.shuffle(films["results"])
 
     for short_film in films["results"][:1]:
-        await bot.send_photo(uid, short_film["poster_file"], caption=f"http://cintoes.link//films/{short_film['url'].split('/films/')[-1].split('/')[0]}",#short_film["title"],
+        await bot.send_photo(uid, short_film["poster_file"], caption=short_film["title"],
             caption_entities=[
-                MessageEntity(MessageEntityType.TEXT_LINK, 0, len(short_film["title"]), short_film["url"])
+                MessageEntity(MessageEntityType.TEXT_LINK, 0, len(short_film["title"]), f"http://cintoes.link//films/{short_film['url'].split('/films/')[-1].split('/')[0]}")
             ],
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [

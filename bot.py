@@ -316,7 +316,7 @@ async def handle_web_app_data_func(message :types.Message):
         "password": password
     }
 
-    response = requests.post("http://cinotes-alb-1929580936.eu-central-1.elb.amazonaws.com/auth/signin", json=data)
+    response = requests.post("http://back.cintoes.link/auth/signin", json=data)
 
     if response.status_code != 200:
         if response.status_code == 404 and "no user with such email" in response.text:
@@ -364,7 +364,7 @@ async def handle_web_app_data_func(message :types.Message):
 
 
 async def get_data(jwt: str, path: str, **kwargs):
-    url = "http://cinotes-alb-1929580936.eu-central-1.elb.amazonaws.com" + path
+    url = "http://back.cintoes.link" + path
 
     if kwargs:
         url += "?"
@@ -452,8 +452,6 @@ async def getrec_func(message: types.Message):
 
     films = (await get_data(jwt, "/films/", genre=fav_genre["title"], page_size=200))[1].json()
 
-    # TODO: тут запрашиваем список тех фильмов, что уже посмотрел, ну и исключаем их из переменной films, а если посмотрел уже все, то игнорим это правило
-
     random.shuffle(films["results"])
 
     for short_film in films["results"][:1]:
@@ -466,7 +464,6 @@ async def getrec_func(message: types.Message):
                     InlineKeyboardButton(TEXTS[lang]["more_info_button_text"], callback_data=f"moreinfo_{short_film['url'].split('/films/')[-1].split('/')[0]}")
                 ]
             ]))
-        # recommendation_system_usage (recommendation_id TEXT PRIMARY KEY NOT NULL, user_id BIGINT NOT NULL, on_date DATE NOT NULL, film_id BIGINT NOT NULL)
 
         while True:
             recommendation_id = gen_rand_text()
